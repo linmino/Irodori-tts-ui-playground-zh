@@ -169,6 +169,30 @@ function intOrNull(value: string) {
   return trimmed === "" ? null : Number.parseInt(trimmed, 10);
 }
 
+function formatSeconds(value?: number | null) {
+  return value == null ? "-" : `${value.toFixed(2)}s`;
+}
+
+function formatNumber(value?: number | null) {
+  return value == null ? "-" : value.toFixed(2);
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-TW", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function audioDownloadUrl(item: GenerationMetadata, audio: AudioArtifact) {
+  return `${audio.url}?t=${item.id}`;
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
@@ -696,21 +720,13 @@ export function Playground() {
             <div className="history-list">
               {history.length === 0 && <EmptyState text="還沒有生成紀錄。" />}
               {history.map((item) => (
-                <div className="history-item" key={item.id}>
-                  <button className="history-play" onClick={() => setActiveGeneration(item)}>
-                    <Play size={15} />
-                  </button>
-                  <div className="history-main">
-                    <strong>{item.text.slice(0, 28) || item.id}</strong>
-                    <span>{item.mode} · {item.duration_seconds?.toFixed(2) ?? "-"}s</span>
-                  </div>
-                  <button className="icon-button" title="套用設定" onClick={() => restoreFromHistory(item)}>
-                    <RotateCcw size={15} />
-                  </button>
-                  <button className="icon-button danger" title="刪除" onClick={() => void deleteHistoryItem(item.id)}>
-                    <Trash2 size={15} />
-                  </button>
-                </div>
+                <HistoryItem
+                  item={item}
+                  key={item.id}
+                  onDelete={() => void deleteHistoryItem(item.id)}
+                  onPlay={() => setActiveGeneration(item)}
+                  onRestore={() => restoreFromHistory(item)}
+                />
               ))}
             </div>
           </Panel>
@@ -737,6 +753,91 @@ export function Playground() {
         </Panel>
       </section>
     </main>
+  );
+}
+
+function HistoryItem({
+  item,
+  onDelete,
+  onPlay,
+  onRestore
+}: {
+  item: GenerationMetadata;
+  onDelete: () => void;
+  onPlay: () => void;
+  onRestore: () => void;
+}) {
+  const firstAudio = item.audios[0];
+
+  return (
+    <div className="history-item">
+      <button className="history-play" title="播放" onClick={onPlay}>
+        <Play size={15} />
+      </button>
+      <div className="history-main">
+        <strong>{item.text.slice(0, 28) || item.id}</strong>
+        <span>
+          {item.mode} · {formatSeconds(item.duration_seconds)} · RTF {formatNumber(item.rtf)} · Seed {item.seed_used ?? "-"}
+        </span>
+      </div>
+      {firstAudio ? (
+        <a className="icon-button" title={`下載 ${firstAudio.filename}`} href={audioDownloadUrl(item, firstAudio)} download={firstAudio.filename}>
+          <Download size={15} />
+        </a>
+      ) : (
+        <button className="icon-button" title="沒有可下載的音檔" disabled>
+          <Download size={15} />
+        </button>
+      )}
+      <button className="icon-button" title="套用設定" onClick={onRestore}>
+        <RotateCcw size={15} />
+      </button>
+      <button className="icon-button danger" title="刪除" onClick={onDelete}>
+        <Trash2 size={15} />
+      </button>
+
+      <details className="history-details">
+        <summary>
+          <SlidersHorizontal size={14} /> 詳情
+        </summary>
+        <dl className="history-detail-grid">
+          <div>
+            <dt>Seed</dt>
+            <dd>{item.seed_used ?? "-"}</dd>
+          </div>
+          <div>
+            <dt>RTF</dt>
+            <dd>{formatNumber(item.rtf)}</dd>
+          </div>
+          <div>
+            <dt>生成時間</dt>
+            <dd>{formatSeconds(item.elapsed_seconds)}</dd>
+          </div>
+          <div>
+            <dt>音長</dt>
+            <dd>{formatSeconds(item.duration_seconds)}</dd>
+          </div>
+          <div>
+            <dt>取樣率</dt>
+            <dd>{item.sample_rate ? `${item.sample_rate} Hz` : "-"}</dd>
+          </div>
+          <div>
+            <dt>建立時間</dt>
+            <dd>{formatDateTime(item.created_at)}</dd>
+          </div>
+        </dl>
+        {item.caption && <p className="history-caption">{item.caption}</p>}
+        {item.audios.length > 0 && (
+          <div className="history-downloads">
+            {item.audios.map((audio) => (
+              <a className="download-link compact" href={audioDownloadUrl(item, audio)} download={audio.filename} key={audio.index}>
+                <Download size={15} /> Candidate {audio.index}
+              </a>
+            ))}
+          </div>
+        )}
+      </details>
+    </div>
   );
 }
 
@@ -930,9 +1031,9 @@ function GenerationResult({ generation }: { generation: GenerationMetadata }) {
   return (
     <div className="result-stack">
       <div className="metrics">
-        <Metric label="時間" value={`${generation.elapsed_seconds?.toFixed(2) ?? "-"}s`} />
-        <Metric label="音長" value={`${generation.duration_seconds?.toFixed(2) ?? "-"}s`} />
-        <Metric label="RTF" value={`${generation.rtf?.toFixed(2) ?? "-"}`} />
+        <Metric label="時間" value={formatSeconds(generation.elapsed_seconds)} />
+        <Metric label="音長" value={formatSeconds(generation.duration_seconds)} />
+        <Metric label="RTF" value={formatNumber(generation.rtf)} />
         <Metric label="Seed" value={String(generation.seed_used ?? "-")} />
       </div>
       {generation.audios.map((audio) => (
