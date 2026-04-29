@@ -16,8 +16,17 @@ frontend/
   src/
     pages/Playground.tsx # 主 UI
     data/presets.ts      # 前端型別與 fallback data
+notebooks/
+  Irodori_TTS_Unified_Playground_Colab_T4.ipynb
+                         # Google Colab T4 一鍵啟動前後端與 tunnel
 outputs/                 # 生成音檔與 metadata，執行時自動建立
 ```
+
+## Colab Notebook
+
+`notebooks/Irodori_TTS_Unified_Playground_Colab_T4.ipynb` 可在 Google Colab T4 runtime 上使用。依序執行 cells 會安裝系統工具、clone 本專案與 upstream `Aratako/Irodori-TTS`、建立 upstream venv、啟動 FastAPI 後端與 Vite 前端，最後透過 Cloudflare Tunnel 或 Colab proxy 開啟 UI。
+
+建議選擇「執行階段 → 變更執行階段類型 → T4 GPU」後，從第一個 cell 開始跑；若服務或 tunnel 跑壞，可使用 notebook 內的重置 cell 後再從後端啟動步驟繼續。
 
 ## 後端啟動
 
