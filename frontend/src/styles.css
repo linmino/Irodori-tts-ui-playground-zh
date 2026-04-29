@@ -730,12 +730,13 @@ button {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 10px;
 }
 
 .metric {
+  min-width: 0;
   padding: 9px;
   border: 1px solid #e3e9f1;
   border-radius: 8px;
@@ -755,6 +756,8 @@ button {
 .metric strong {
   margin-top: 4px;
   font-size: 15px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .batch-textarea {
@@ -781,7 +784,7 @@ button {
 
 .batch-summary {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -959,6 +962,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .running-state,
@@ -976,6 +980,7 @@ button {
 }
 
 .audio-card {
+  min-width: 0;
   padding: 10px;
   border: 1px solid #e3e9f1;
   border-radius: 8px;

@@ -238,12 +238,13 @@ function statusLabel(status: BatchItemStatus) {
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
-    let detail = response.statusText;
+    const rawBody = await response.text();
+    let detail = rawBody || response.statusText;
     try {
-      const body = await response.json();
-      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      const body = JSON.parse(rawBody) as { detail?: unknown };
+      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
     } catch {
-      detail = await response.text();
+      // rawBody already contains the best available non-JSON error detail.
     }
     throw new Error(detail);
   }
