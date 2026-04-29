@@ -5,4 +5,5 @@ outputs/
 .pytest_cache/
 .mypy_cache/
 .playwright-mcp/
+.codex/
 *.pyc

@@ -252,7 +252,14 @@ class RuntimeManager:
     def _resolve_precision(self, value: str, device: str) -> str:
         if value != "auto":
             return value
-        return "bf16" if device == "cuda" else "fp32"
+        if device == "cuda":
+            try:
+                import torch
+
+                return "bf16" if torch.cuda.is_bf16_supported() else "fp32"
+            except ImportError:
+                return "fp32"
+        return "fp32"
 
     def _resolve_checkpoint(self, checkpoint: str) -> str:
         path = Path(checkpoint)
