@@ -695,10 +695,15 @@ export function Playground() {
                       <button
                         className="emoji-button"
                         key={`${item.emoji}-${item.zh}`}
-                        title={`${item.zh} / ${item.ja}`}
+                        aria-label={`${item.emoji} ${item.zh} / ${item.ja}`}
                         onClick={() => insertIntoTextarea(item.emoji)}
                       >
                         {item.emoji}
+                        <span className="emoji-tooltip" role="tooltip">
+                          <strong>{item.zh}</strong>
+                          <span>{item.ja}</span>
+                          <span>{item.en}</span>
+                        </span>
                       </button>
                     ))}
                   </div>
