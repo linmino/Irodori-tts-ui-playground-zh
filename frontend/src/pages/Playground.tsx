@@ -7,6 +7,7 @@ import {
   Download,
   FileAudio,
   History,
+  ListChecks,
   HelpCircle,
   Loader2,
   Mic2,
@@ -109,6 +110,17 @@ type VoiceDesignForm = {
   maxCaptionLen: string;
 };
 
+type BatchItemStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+type BatchItem = {
+  id: string;
+  index: number;
+  text: string;
+  status: BatchItemStatus;
+  generation?: GenerationMetadata;
+  error?: string;
+};
+
 const defaultReferenceForm: ReferenceForm = {
   text: "こんにちは、今日はとてもいい天気ですね 😊",
   checkpoint: "Aratako/Irodori-TTS-500M-v2",
@@ -144,6 +156,7 @@ const defaultVoiceDesignForm: VoiceDesignForm = {
 };
 
 const storageKey = "irodori-unified-playground-state";
+const batchLimit = 50;
 
 function readStoredState() {
   try {
@@ -193,6 +206,35 @@ function audioDownloadUrl(item: GenerationMetadata, audio: AudioArtifact) {
   return `${audio.url}?t=${item.id}`;
 }
 
+function createLocalId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function parseBatchLines(value: string) {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function statusLabel(status: BatchItemStatus) {
+  switch (status) {
+    case "pending":
+      return "等待中";
+    case "running":
+      return "生成中";
+    case "completed":
+      return "完成";
+    case "failed":
+      return "失敗";
+    case "cancelled":
+      return "已停止";
+  }
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
@@ -223,16 +265,38 @@ export function Playground() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [history, setHistory] = useState<GenerationMetadata[]>([]);
   const [activeGeneration, setActiveGeneration] = useState<GenerationMetadata | null>(null);
+  const [batchText, setBatchText] = useState("");
+  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [selectedBatchItemId, setSelectedBatchItemId] = useState<string | null>(null);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [playingBatchItemId, setPlayingBatchItemId] = useState<string | null>(null);
   const [referenceAudio, setReferenceAudio] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadingModel, setLoadingModel] = useState(false);
   const [notice, setNotice] = useState<string>("");
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const captionRef = useRef<HTMLTextAreaElement | null>(null);
+  const batchStopRef = useRef(false);
+  const batchAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const form = mode === "reference" ? referenceForm : voiceForm;
   const runtime = health?.runtime;
   const activeLoaded = runtime?.active_mode === mode;
+  const batchLines = useMemo(() => parseBatchLines(batchText), [batchText]);
+  const selectedBatchItem = batchItems.find((item) => item.id === selectedBatchItemId) ?? null;
+  const batchSummary = useMemo(() => {
+    return batchItems.reduce(
+      (summary, item) => {
+        summary.total += 1;
+        if (item.status === "completed") summary.completed += 1;
+        if (item.status === "failed") summary.failed += 1;
+        if (item.status === "cancelled") summary.cancelled += 1;
+        summary.elapsed += item.generation?.elapsed_seconds ?? 0;
+        return summary;
+      },
+      { total: 0, completed: 0, failed: 0, cancelled: 0, elapsed: 0 }
+    );
+  }, [batchItems]);
   const noteByName = useMemo(() => {
     return presets.parameter_notes.reduce<Record<string, ParameterNote>>((notes, note) => {
       notes[note.name] = note;
@@ -292,6 +356,13 @@ export function Playground() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+
+  useEffect(() => {
+    return () => {
+      batchAudioRef.current?.pause();
+      batchAudioRef.current = null;
+    };
+  }, []);
 
   function updateReference(patch: Partial<ReferenceForm>) {
     setReferenceForm((current) => ({ ...current, ...patch }));
@@ -360,11 +431,15 @@ export function Playground() {
     }
   }
 
-  function buildPayload() {
+  function updateBatchItem(id: string, patch: Partial<BatchItem>) {
+    setBatchItems((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  }
+
+  function buildPayload(textOverride?: string) {
     if (mode === "reference") {
       return {
         mode,
-        text: referenceForm.text,
+        text: textOverride ?? referenceForm.text,
         no_ref: referenceForm.noRef,
         num_steps: referenceForm.numSteps,
         num_candidates: referenceForm.numCandidates,
@@ -382,7 +457,7 @@ export function Playground() {
     }
     return {
       mode,
-      text: voiceForm.text,
+      text: textOverride ?? voiceForm.text,
       caption: voiceForm.caption,
       no_ref: true,
       num_steps: voiceForm.numSteps,
@@ -398,20 +473,24 @@ export function Playground() {
     };
   }
 
+  async function submitGeneration(payload: Record<string, unknown>, referenceFile = referenceAudio) {
+    const formData = new FormData();
+    formData.append("payload", JSON.stringify(payload));
+    if (payload.mode === "reference" && !payload.no_ref && referenceFile) {
+      formData.append("reference_audio", referenceFile);
+    }
+    return fetchJson<{ id: string; status: string; url: string }>("/api/v1/generations", {
+      method: "POST",
+      body: formData
+    });
+  }
+
   async function generate() {
     setBusy(true);
     setNotice("");
     try {
       const payload = buildPayload();
-      const formData = new FormData();
-      formData.append("payload", JSON.stringify(payload));
-      if (mode === "reference" && !referenceForm.noRef && referenceAudio) {
-        formData.append("reference_audio", referenceAudio);
-      }
-      const job = await fetchJson<{ id: string; status: string; url: string }>("/api/v1/generations", {
-        method: "POST",
-        body: formData
-      });
+      const job = await submitGeneration(payload);
       const completed = await pollGeneration(job.id);
       setActiveGeneration(completed);
       await refreshHistory();
@@ -423,14 +502,132 @@ export function Playground() {
     }
   }
 
-  async function pollGeneration(id: string) {
+  async function pollGeneration(id: string, onUpdate?: (metadata: GenerationMetadata) => void, syncActive = true) {
     for (;;) {
       const metadata = await fetchJson<GenerationMetadata>(`/api/v1/generations/${id}`);
-      setActiveGeneration(metadata);
+      onUpdate?.(metadata);
+      if (syncActive) setActiveGeneration(metadata);
       if (metadata.status === "completed") return metadata;
       if (metadata.status === "failed") throw new Error(metadata.error ?? "生成失敗。");
       await new Promise((resolve) => window.setTimeout(resolve, 800));
     }
+  }
+
+  async function runBatchItem(item: BatchItem, payload = buildPayload(item.text), referenceFile = referenceAudio) {
+    updateBatchItem(item.id, { status: "running", error: undefined });
+    setSelectedBatchItemId(item.id);
+    const job = await submitGeneration(payload, referenceFile);
+    const completed = await pollGeneration(job.id, (metadata) => {
+      updateBatchItem(item.id, { generation: metadata, status: metadata.status === "completed" ? "completed" : "running" });
+    }, false);
+    updateBatchItem(item.id, { status: "completed", generation: completed, error: undefined });
+    return completed;
+  }
+
+  async function startBatchGeneration() {
+    if (batchRunning) return;
+    const lines = parseBatchLines(batchText);
+    if (lines.length === 0) {
+      setNotice("請先輸入批量文字。");
+      return;
+    }
+    if (lines.length > batchLimit) {
+      setNotice(`批量生成上限為 ${batchLimit} 段，請先縮減文字。`);
+      return;
+    }
+    if (!activeLoaded) {
+      setNotice("請先載入目前模式的模型。");
+      return;
+    }
+
+    const items = lines.map<BatchItem>((text, index) => ({
+      id: createLocalId(),
+      index: index + 1,
+      text,
+      status: "pending"
+    }));
+    const payloadById = new Map(items.map((item) => [item.id, buildPayload(item.text)]));
+    const referenceFile = referenceAudio;
+
+    batchStopRef.current = false;
+    setBatchItems(items);
+    setSelectedBatchItemId(items[0]?.id ?? null);
+    setBatchRunning(true);
+    setNotice("");
+
+    try {
+      for (const item of items) {
+        if (batchStopRef.current) {
+          setBatchItems((current) =>
+            current.map((currentItem) =>
+              currentItem.status === "pending" ? { ...currentItem, status: "cancelled" } : currentItem
+            )
+          );
+          break;
+        }
+        try {
+          await runBatchItem(item, payloadById.get(item.id), referenceFile);
+        } catch (error) {
+          updateBatchItem(item.id, {
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+      await refreshHistory();
+      await refreshHealth();
+    } finally {
+      setBatchRunning(false);
+    }
+  }
+
+  function stopBatchGeneration() {
+    batchStopRef.current = true;
+    setNotice("已要求停止批量生成；目前這筆完成後就不會送出下一筆。");
+  }
+
+  function clearBatchResults() {
+    batchAudioRef.current?.pause();
+    batchAudioRef.current = null;
+    setPlayingBatchItemId(null);
+    setBatchItems([]);
+    setSelectedBatchItemId(null);
+  }
+
+  async function retryBatchItem(item: BatchItem) {
+    if (batchRunning || !activeLoaded) return;
+    batchStopRef.current = false;
+    setBatchRunning(true);
+    setNotice("");
+    try {
+      await runBatchItem(item);
+      await refreshHistory();
+      await refreshHealth();
+    } catch (error) {
+      updateBatchItem(item.id, {
+        status: "failed",
+        generation: undefined,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setBatchRunning(false);
+    }
+  }
+
+  function playBatchItem(item: BatchItem) {
+    const firstAudio = item.generation?.audios[0];
+    if (!item.generation || !firstAudio) return;
+    batchAudioRef.current?.pause();
+    const audio = new Audio(audioDownloadUrl(item.generation, firstAudio));
+    batchAudioRef.current = audio;
+    setSelectedBatchItemId(item.id);
+    setPlayingBatchItemId(item.id);
+    audio.onended = () => setPlayingBatchItemId(null);
+    audio.onpause = () => setPlayingBatchItemId((current) => (current === item.id ? null : current));
+    void audio.play().catch((error) => {
+      setPlayingBatchItemId(null);
+      setNotice(error instanceof Error ? error.message : String(error));
+    });
   }
 
   function applySample(sample: SampleText) {
@@ -685,6 +882,66 @@ export function Playground() {
             </div>
           </Panel>
 
+          <Panel title="批量生成" icon={<ListChecks size={18} />} badge={`${batchLines.length}/${batchLimit}`}>
+            <textarea
+              value={batchText}
+              onChange={(event) => setBatchText(event.target.value)}
+              className="main-textarea batch-textarea"
+              rows={6}
+              placeholder="一行一段文字，空白行會自動忽略。"
+            />
+            <div className="batch-meta-row">
+              <span>
+                目前模式：{mode === "reference" ? "Reference Voice" : "VoiceDesign"} · 共 {batchLines.length} 段
+              </span>
+              {batchLines.length > batchLimit && <strong>超過 {batchLimit} 段上限</strong>}
+            </div>
+            <div className="button-row">
+              <button
+                className="primary-button"
+                disabled={batchRunning || busy || !activeLoaded || batchLines.length === 0 || batchLines.length > batchLimit}
+                onClick={() => void startBatchGeneration()}
+              >
+                {batchRunning ? <Loader2 className="spin" size={17} /> : <Send size={17} />}
+                開始批量生成
+              </button>
+              <button className="ghost-button" disabled={!batchRunning} onClick={stopBatchGeneration}>
+                <XCircle size={16} /> 停止
+              </button>
+              <button className="ghost-button" disabled={batchRunning || batchItems.length === 0} onClick={clearBatchResults}>
+                <Trash2 size={16} /> 清空結果
+              </button>
+            </div>
+
+            {batchItems.length > 0 && (
+              <div className="batch-results">
+                <div className="batch-summary">
+                  <Metric label="總數" value={String(batchSummary.total)} />
+                  <Metric label="完成" value={String(batchSummary.completed)} />
+                  <Metric label="失敗" value={String(batchSummary.failed)} />
+                  <Metric label="總耗時" value={formatSeconds(batchSummary.elapsed)} />
+                </div>
+                <div className="batch-result-layout">
+                  <div className="batch-list" aria-label="批量生成結果">
+                    {batchItems.map((item) => (
+                      <BatchItemRow
+                        item={item}
+                        isSelected={item.id === selectedBatchItemId}
+                        isPlaying={item.id === playingBatchItemId}
+                        isBusy={batchRunning}
+                        key={item.id}
+                        onPlay={() => playBatchItem(item)}
+                        onPreview={() => setSelectedBatchItemId(item.id)}
+                        onRetry={() => void retryBatchItem(item)}
+                      />
+                    ))}
+                  </div>
+                  <BatchPreview item={selectedBatchItem} />
+                </div>
+              </div>
+            )}
+          </Panel>
+
           <Panel id="emoji" title="快速插入：Emoji / 語氣" icon={<Palette size={18} />}>
             <div className="emoji-groups">
               {Object.entries(emojiGroups).map(([category, items]) => (
@@ -842,6 +1099,91 @@ function HistoryItem({
           </div>
         )}
       </details>
+    </div>
+  );
+}
+
+function BatchItemRow({
+  item,
+  isSelected,
+  isPlaying,
+  isBusy,
+  onPlay,
+  onPreview,
+  onRetry
+}: {
+  item: BatchItem;
+  isSelected: boolean;
+  isPlaying: boolean;
+  isBusy: boolean;
+  onPlay: () => void;
+  onPreview: () => void;
+  onRetry: () => void;
+}) {
+  const generation = item.generation;
+  const firstAudio = generation?.audios[0];
+  const canUseAudio = item.status === "completed" && generation && firstAudio;
+  const rowClass = ["batch-item", isSelected ? "selected" : "", isPlaying ? "playing" : "", item.status].filter(Boolean).join(" ");
+
+  return (
+    <div className={rowClass}>
+      <div className="batch-index">{item.index}</div>
+      <div className="batch-item-main">
+        <div className="batch-item-topline">
+          <span className={`batch-status ${item.status}`}>{statusLabel(item.status)}</span>
+          <strong>{item.text}</strong>
+        </div>
+        <span className="batch-item-meta">
+          Seed {generation?.seed_used ?? "-"} · 音長 {formatSeconds(generation?.duration_seconds)} · RTF {formatNumber(generation?.rtf)} · 耗時 {formatSeconds(generation?.elapsed_seconds)}
+        </span>
+        {item.error && <span className="batch-error">{item.error}</span>}
+      </div>
+      <div className="batch-actions">
+        <button className="icon-button" title="播放第一個 candidate" disabled={!canUseAudio} onClick={onPlay}>
+          <Play size={15} />
+        </button>
+        <button className="icon-button" title="預覽" disabled={!generation && item.status !== "running"} onClick={onPreview}>
+          <SlidersHorizontal size={15} />
+        </button>
+        {canUseAudio ? (
+          <a className="icon-button" title={`下載 ${firstAudio.filename}`} href={audioDownloadUrl(generation, firstAudio)} download={firstAudio.filename}>
+            <Download size={15} />
+          </a>
+        ) : (
+          <button className="icon-button" title="沒有可下載的音檔" disabled>
+            <Download size={15} />
+          </button>
+        )}
+        <button className="icon-button" title="重試此筆" disabled={isBusy || item.status === "running"} onClick={onRetry}>
+          <RotateCcw size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BatchPreview({ item }: { item: BatchItem | null }) {
+  if (!item) {
+    return (
+      <div className="batch-preview">
+        <EmptyState text="選取一筆結果後會在這裡試聽。" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="batch-preview">
+      <div className="batch-preview-header">
+        <span>#{item.index}</span>
+        <strong>{statusLabel(item.status)}</strong>
+      </div>
+      <p className="batch-preview-text">{item.text}</p>
+      {item.error && <div className="batch-preview-error">{item.error}</div>}
+      {item.generation ? (
+        <GenerationResult generation={item.generation} />
+      ) : (
+        <EmptyState text={item.status === "pending" ? "這筆尚未開始生成。" : "等待後端回傳生成狀態。"} />
+      )}
     </div>
   );
 }
